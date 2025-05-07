@@ -1,0 +1,25 @@
+[project]
+name = "mcp-server2"
+version = "0.1.0"
+description = "A tool for database analysis using natural language and LLMs"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Ope Mesonrale", email = "ope.mesonrale@gmail.com"}
+]
+
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.6.0",
+    "pandas>=2.0.0",
+    "openai>=1.0.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "tabulate>=0.8.9",
+    "pydantic>=2.0.0",
+    "python-dotenv>=0.19.0",
+    "psycopg2-binary>=2.9.9",
+    "pymongo>=4.6.1",
+    "requests>=2.31.0",
+    "pydantic[email]>=2.0.0"
+    ]
