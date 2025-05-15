@@ -129,6 +129,7 @@ class MongoDBManager:
                 - String like 'show collections'
                 - MongoDB shell syntax like 'db.users.find()'
                 - Dict for commands like {'find': 'users', 'filter': {...}}
+                - Advanced MongoDB queries with various formats
 
         Returns:
             Any: Query results or metadata depending on the command.
@@ -144,26 +145,116 @@ class MongoDBManager:
                 "show dbs", 
                 "show databases",
                 "db stats", 
-                "db.stats()"
+                "db.stats()",
+                "show profile",
+                "db.getProfilingStatus()",
+                "db.version()"
             }
             
             SAFE_DICT_OPERATIONS = {
                 # Read-only collection operations
-                "find", "count", "distinct", "aggregate",
+                "find", "count", "distinct", "aggregate", "findOne", "countDocuments", "estimatedDocumentCount",
                 # Read-only database commands
-                "listCollections", "dbstats", "collstats", "dataSize", "dbStats",
-                "listIndexes", "getParameter", "buildInfo", "connectionStatus", "serverStatus"
+                "listCollections", "dbstats", "collstats", "dataSize", "dbStats", "ping", "hostInfo", "serverInfo",
+                "listIndexes", "getParameter", "buildInfo", "connectionStatus", "serverStatus", "validate", "profile"
             }
             
             # Check for unsafe keywords that might be part of a query
             def contains_unsafe_operations(cmd_str: str) -> bool:
-                UNSAFE_KEYWORDS = [
-                    "insert", "update", "delete", "remove", "drop", "create", 
-                    "replace", "rename", "$out", "$merge", "mapreduce", 
-                    "createindex", "dropindex", "createcollection", "renameCollection"
+                UNSAFE_PATTERNS = [
+                    r"\binsert\b", r"\bupdate\b", r"\bdelete\b", r"\bremove\b", 
+                    r"\bdrop\b", r"\bcreate\b", r"\breplace\b", r"\brename\b",
+                    r"\$out\b", r"\$merge\b", r"\bmapreduce\b", 
+                    r"\bcreateindex\b", r"\bdropindex\b", r"\bcreatecollection\b", r"\brenameCollection\b"
                 ]
                 cmd_lower = cmd_str.lower()
-                return any(keyword in cmd_lower for keyword in UNSAFE_KEYWORDS)
+                # Special case for operators like $dateToString that contain "safe" words as substrings
+                SAFE_OPERATORS = [
+                    "$dateToString", "$dateFromString", "$dateToparts", "$createDate"
+                ]
+                
+                # Check if any of the safe operators are in the command
+                for safe_op in SAFE_OPERATORS:
+                    if safe_op.lower() in cmd_lower:
+                        # Remove these safe operators from the string before checking for unsafe patterns
+                        cmd_lower = cmd_lower.replace(safe_op.lower(), "")
+                        
+                # Check for unsafe patterns
+                return any(re.search(pattern, cmd_lower) for pattern in UNSAFE_PATTERNS)
+            
+            # Parse MongoDB shell syntax more robustly
+            def parse_shell_command(cmd: str):
+                # Extract collection and operation parts
+                if not cmd.startswith("db."):
+                    return None, None, None, None
+                
+                parts = cmd.split(".", 2)
+                if len(parts) < 3:
+                    return None, None, None, None
+                
+                collection_name = parts[1]
+                operation_part = parts[2]
+                
+                # Handle cases like db.collection.find({...}).sort({...}).limit(10)
+                op_chain = []
+                current_op = ""
+                depth = 0
+                param_start = -1
+                
+                for i, char in enumerate(operation_part):
+                    if char == '(' and depth == 0:
+                        # Start of parameters
+                        op_name = current_op.strip()
+                        param_start = i + 1
+                        depth += 1
+                        current_op = ""
+                    elif char == '(' and depth > 0:
+                        depth += 1
+                    elif char == ')' and depth > 0:
+                        depth -= 1
+                        if depth == 0:
+                            # End of parameters
+                            params = operation_part[param_start:i].strip()
+                            op_chain.append((op_name, params))
+                    elif char == '.' and depth == 0:
+                        # Next operation in chain
+                        current_op = ""
+                    elif depth == 0:
+                        current_op += char
+                
+                if not op_chain:
+                    return None, None, None, None
+                
+                primary_op, primary_params = op_chain[0]
+                chained_ops = op_chain[1:] if len(op_chain) > 1 else []
+                
+                return collection_name, primary_op, primary_params, chained_ops
+            
+            # Parse and evaluate JSON-like parameters safely
+            def safe_eval_params(params_str: str):
+                if not params_str.strip():
+                    return {}
+                    
+                # Try to handle various parameter formats
+                try:
+                    # First attempt direct JSON parsing
+                    return json.loads(params_str)
+                except json.JSONDecodeError:
+                    try:
+                        # Handle JavaScript style parameters (unquoted keys)
+                        # Convert to proper JSON format by quoting keys
+                        fixed_params = re.sub(r'(\w+)(?=\s*:)', r'"\1"', params_str)
+                        return json.loads(fixed_params)
+                    except (json.JSONDecodeError, re.error):
+                        try:
+                            # Handle ObjectId references
+                            if "ObjectId" in params_str:
+                                # Replace ObjectId syntax with proper format
+                                params_str = re.sub(r'ObjectId\(["\'](.+?)["\']\)', r'{"$oid": "\1"}', params_str)
+                                return json.loads(params_str)
+                        except (json.JSONDecodeError, re.error):
+                            self.logger.add_log(f"❌ Failed to parse parameters: {params_str}")
+                            raise ValueError(f"Could not parse query parameters: {params_str}")
                     
             # Handle string-based commands
             if isinstance(raw_command, str):
@@ -180,73 +271,129 @@ class MongoDBManager:
                     if cmd_lower == "show collections":
                         result = self.db.list_collection_names()
                         return result
-                    elif cmd_lower == "show dbs" or cmd_lower == "show databases":
+                    elif cmd_lower in ("show dbs", "show databases"):
                         result = self.client.list_database_names()
                         return result
-                    elif cmd_lower == "db stats" or cmd_lower == "db.stats()":
+                    elif cmd_lower in ("db stats", "db.stats()"):
                         return self.db.command("dbstats")
+                    elif cmd_lower == "show profile":
+                        return self.db.command("profile", -1)
+                    elif cmd_lower == "db.getProfilingStatus()":
+                        return self.db.command("profile", -1)
+                    elif cmd_lower == "db.version()":
+                        return self.db.command("buildInfo").get("version")
                 
                 # Handle MongoDB shell syntax (db.collection.method())
                 elif cmd.startswith("db."):
                     # Parse the command to extract collection and operation
-                    parts = cmd.split(".")
+                    collection_name, primary_op, primary_params, chained_ops = parse_shell_command(cmd)
                     
-                    # Handle db.getCollectionNames()
-                    if len(parts) == 2 and parts[1] == "getCollectionNames()":
+                    if collection_name == "getCollectionNames()":
                         return self.db.list_collection_names()
                     
-                    # Handle collection operations like db.users.find()
-                    elif len(parts) >= 3:
-                        collection_name = parts[1]
-                        operation_part = ".".join(parts[2:])
+                    if not collection_name or not primary_op:
+                        self.logger.add_log(f"❌ Could not parse MongoDB shell command: {cmd}")
+                        return {"error": "Invalid MongoDB shell command format"}
+                    
+                    # Process the primary operation
+                    try:
+                        collection = self.db[collection_name]
                         
-                        # Extract the operation name and parameters
-                        match = re.match(r'(\w+)\((.*)\)(?:\.(\w+)\((.*)\))?', operation_part)
-                        if match:
-                            primary_op, primary_params, chained_op, chained_params = match.groups()
+                        # Handle findOne()
+                        if primary_op == "findOne":
+                            filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+                            result = collection.find_one(filter_dict)
+                            return json.loads(json_util.dumps(result)) if result else None
+                        
+                        # Handle find() and variations
+                        elif primary_op == "find":
+                            filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+                            cursor = collection.find(filter_dict)
                             
-                            # Handle findOne()
-                            if primary_op == "findOne":
-                                filter_dict = {} if not primary_params.strip() else json.loads(primary_params)
-                                result = self.db[collection_name].find_one(filter_dict)
-                                return json.loads(json_util.dumps(result)) if result else None
+                            # Process chained operations (sort, limit, skip, etc.)
+                            for op_name, op_params in chained_ops:
+                                if op_name == "count":
+                                    return collection.count_documents(filter_dict)
+                                elif op_name == "sort":
+                                    sort_params = safe_eval_params(op_params)
+                                    cursor = cursor.sort(list(sort_params.items()))
+                                elif op_name == "limit":
+                                    limit_val = int(op_params.strip())
+                                    cursor = cursor.limit(limit_val)
+                                elif op_name == "skip":
+                                    skip_val = int(op_params.strip())
+                                    cursor = cursor.skip(skip_val)
+                                elif op_name == "project" or op_name == "projection":
+                                    proj_params = safe_eval_params(op_params)
+                                    cursor = cursor.projection(proj_params)
                             
-                            # Handle find() and variations
-                            elif primary_op == "find":
-                                filter_dict = {} if not primary_params.strip() else json.loads(primary_params)
-                                
-                                # Handle chained operations like find().count()
-                                if chained_op == "count":
-                                    return self.db[collection_name].count_documents(filter_dict)
+                            # If no chained operations consumed the result, return the cursor as a list
+                            result = list(cursor)
+                            return json.loads(json_util.dumps(result)) if result else []
+                        
+                        # Handle aggregate()
+                        elif primary_op == "aggregate":
+                            pipeline = safe_eval_params(primary_params) if primary_params.strip() else []
+                            
+                            # Ensure the pipeline doesn't contain $out or $merge
+                            for stage in pipeline:
+                                if "$out" in stage or "$merge" in stage:
+                                    self.logger.add_log(f"❌ Blocked unsafe aggregation stage in: {raw_command}")
+                                    return {"error": "Unsafe aggregation stage detected"}
+                            
+                            result = list(collection.aggregate(pipeline))
+                            return json.loads(json_util.dumps(result)) if result else []
+                        
+                        # Handle count() and countDocuments()
+                        elif primary_op in ("count", "countDocuments"):
+                            filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+                            return collection.count_documents(filter_dict)
+                        
+                        # Handle estimatedDocumentCount()
+                        elif primary_op == "estimatedDocumentCount":
+                            return collection.estimated_document_count()
+                        
+                        # Handle distinct()
+                        elif primary_op == "distinct":
+                            # Split params by the first comma outside of brackets/objects
+                            params = []
+                            current_param = ""
+                            depth = 0
+                            
+                            for char in primary_params:
+                                if char in "{[":
+                                    depth += 1
+                                    current_param += char
+                                elif char in "}]":
+                                    depth -= 1
+                                    current_param += char
+                                elif char == ',' and depth == 0:
+                                    params.append(current_param.strip())
+                                    current_param = ""
                                 else:
-                                    result = list(self.db[collection_name].find(filter_dict))
-                                    return json.loads(json_util.dumps(result)) if result else []
+                                    current_param += char
                             
-                            # Handle aggregate()
-                            elif primary_op == "aggregate":
-                                # Ensure the pipeline doesn't contain $out or $merge
-                                pipeline = json.loads(primary_params)
-                                for stage in pipeline:
-                                    if "$out" in stage or "$merge" in stage:
-                                        self.logger.add_log(f"❌ Blocked unsafe aggregation stage in: {raw_command}")
-                                        return {"error": "Unsafe aggregation stage detected"}
-                                
-                                result = list(self.db[collection_name].aggregate(pipeline))
+                            if current_param:
+                                params.append(current_param.strip())
+                            
+                            if len(params) >= 1:
+                                key = params[0].strip().strip('"\'')
+                                filter_dict = {} if len(params) < 2 else safe_eval_params(params[1])
+                                result = collection.distinct(key, filter_dict)
                                 return json.loads(json_util.dumps(result)) if result else []
-                            
-                            # Handle count()
-                            elif primary_op == "count":
-                                filter_dict = {} if not primary_params.strip() else json.loads(primary_params)
-                                return self.db[collection_name].count_documents(filter_dict)
-                            
-                            # Handle distinct()
-                            elif primary_op == "distinct":
-                                params = primary_params.split(",")
-                                if len(params) >= 1:
-                                    key = params[0].strip().strip('"\'')
-                                    filter_dict = {} if len(params) < 2 else json.loads(params[1])
-                                    result = self.db[collection_name].distinct(key, filter_dict)
-                                    return json.loads(json_util.dumps(result)) if result else []
+                        
+                        # Handle stats()
+                        elif primary_op == "stats":
+                            return self.db.command("collstats", collection_name)
+                        
+                        # Handle explain()
+                        elif primary_op == "explain":
+                            explain_params = safe_eval_params(primary_params)
+                            return collection.find(explain_params).explain()
+                    
+                    except Exception as e:
+                        self.logger.add_log(f"❌ Error executing MongoDB shell command: {str(e)}")
+                        return {"error": f"Error executing command: {str(e)}"}
                 
                 # Command not recognized
                 self.logger.add_log(f"❌ Unsupported or potentially unsafe string command: {raw_command}")
@@ -267,22 +414,40 @@ class MongoDBManager:
                     projection = raw_command.get("projection")
                     sort = raw_command.get("sort")
                     limit = raw_command.get("limit")
+                    skip = raw_command.get("skip")
+                    hint = raw_command.get("hint")
+                    max_time_ms = raw_command.get("maxTimeMS")
 
                     cursor = self.db[coll_name].find(filter_, projection or {})
                     if sort:
-                        cursor = cursor.sort(sort.items() if isinstance(sort, dict) else sort)
+                        cursor = cursor.sort(list(sort.items()) if isinstance(sort, dict) else sort)
                     if limit:
                         cursor = cursor.limit(limit)
+                    if skip:
+                        cursor = cursor.skip(skip)
+                    if hint:
+                        cursor = cursor.hint(hint)
+                    if max_time_ms:
+                        cursor = cursor.max_time_ms(max_time_ms)
 
                     result = list(cursor)
                     return json.loads(json_util.dumps(result)) if result else []
                 
-                # Handle other safe operations
-                elif any(op in raw_command for op in ["count", "distinct", "aggregate"]):
-                    op = next(op for op in ["count", "distinct", "aggregate"] if op in raw_command)
+                # Handle findOne operation
+                elif "findOne" in raw_command:
+                    coll_name = raw_command["findOne"]
+                    filter_ = raw_command.get("filter", {})
+                    projection = raw_command.get("projection")
+                    
+                    result = self.db[coll_name].find_one(filter_, projection or {})
+                    return json.loads(json_util.dumps(result)) if result else None
+                
+                # Handle other collection operations
+                elif any(op in raw_command for op in ["count", "countDocuments", "distinct", "aggregate"]):
+                    op = next(op for op in ["count", "countDocuments", "distinct", "aggregate"] if op in raw_command)
                     coll_name = raw_command[op]
                     
-                    if op == "count":
+                    if op in ["count", "countDocuments"]:
                         filter_ = raw_command.get("filter", {})
                         return self.db[coll_name].count_documents(filter_)
                     
@@ -305,6 +470,15 @@ class MongoDBManager:
                         result = list(self.db[coll_name].aggregate(pipeline))
                         return json.loads(json_util.dumps(result)) if result else []
                 
+                # For database and collection information commands
+                elif "listCollections" in raw_command:
+                    filter_ = raw_command.get("filter", {})
+                    return list(self.db.list_collections(filter_))
+                
+                elif "collStats" in raw_command or "collstats" in raw_command:
+                    coll_name = raw_command.get("collStats") or raw_command.get("collstats")
+                    return self.db.command("collstats", coll_name)
+                
                 # For other dict commands, only allow specifically whitelisted operations
                 else:
                     # Extract operation name (first key in dict)
@@ -323,17 +497,20 @@ class MongoDBManager:
         except Exception as e:
             self.logger.add_log(f"❌ Query execution error: {str(e)}")
             return {"error": f"Query execution error: {str(e)}"}
-
  
     # def execute_query(self, raw_command: Union[str, Dict[str, Any]]) -> Any:
     #     """
     #     Executes a dynamic MongoDB command or query string for READ-ONLY operations.
         
+    #     Supports both dictionary-based commands and MongoDB shell-style syntax.
     #     Any commands that would modify the database (create, update, delete) are blocked.
 
     #     Args:
-    #         raw_command (str | dict): The read-only command/query to execute. Can be a string like 'show collections' 
-    #                                 or a dict for commands like {'listCollections': 1}.
+    #         raw_command (str | dict): The read-only command/query to execute. Can be:
+    #             - String like 'show collections'
+    #             - MongoDB shell syntax like 'db.users.find()'
+    #             - Dict for commands like {'find': 'users', 'filter': {...}}
+    #             - Advanced MongoDB queries with various formats
 
     #     Returns:
     #         Any: Query results or metadata depending on the command.
@@ -349,15 +526,18 @@ class MongoDBManager:
     #             "show dbs", 
     #             "show databases",
     #             "db stats", 
-    #             "db.stats()"
+    #             "db.stats()",
+    #             "show profile",
+    #             "db.getProfilingStatus()",
+    #             "db.version()"
     #         }
             
     #         SAFE_DICT_OPERATIONS = {
     #             # Read-only collection operations
-    #             "find", "count", "distinct", "aggregate",
+    #             "find", "count", "distinct", "aggregate", "findOne", "countDocuments", "estimatedDocumentCount",
     #             # Read-only database commands
-    #             "listCollections", "dbstats", "collstats", "dataSize", "dbStats",
-    #             "listIndexes", "getParameter", "buildInfo", "connectionStatus", "serverStatus"
+    #             "listCollections", "dbstats", "collstats", "dataSize", "dbStats", "ping", "hostInfo", "serverInfo",
+    #             "listIndexes", "getParameter", "buildInfo", "connectionStatus", "serverStatus", "validate", "profile"
     #         }
             
     #         # Check for unsafe keywords that might be part of a query
@@ -369,29 +549,223 @@ class MongoDBManager:
     #             ]
     #             cmd_lower = cmd_str.lower()
     #             return any(keyword in cmd_lower for keyword in UNSAFE_KEYWORDS)
+            
+    #         # Parse MongoDB shell syntax more robustly
+    #         def parse_shell_command(cmd: str):
+    #             # Extract collection and operation parts
+    #             if not cmd.startswith("db."):
+    #                 return None, None, None, None
+                
+    #             parts = cmd.split(".", 2)
+    #             if len(parts) < 3:
+    #                 return None, None, None, None
+                
+    #             collection_name = parts[1]
+    #             operation_part = parts[2]
+                
+    #             # Handle cases like db.collection.find({...}).sort({...}).limit(10)
+    #             op_chain = []
+    #             current_op = ""
+    #             depth = 0
+    #             param_start = -1
+                
+    #             for i, char in enumerate(operation_part):
+    #                 if char == '(' and depth == 0:
+    #                     # Start of parameters
+    #                     op_name = current_op.strip()
+    #                     param_start = i + 1
+    #                     depth += 1
+    #                     current_op = ""
+    #                 elif char == '(' and depth > 0:
+    #                     depth += 1
+    #                 elif char == ')' and depth > 0:
+    #                     depth -= 1
+    #                     if depth == 0:
+    #                         # End of parameters
+    #                         params = operation_part[param_start:i].strip()
+    #                         op_chain.append((op_name, params))
+    #                 elif char == '.' and depth == 0:
+    #                     # Next operation in chain
+    #                     current_op = ""
+    #                 elif depth == 0:
+    #                     current_op += char
+                
+    #             if not op_chain:
+    #                 return None, None, None, None
+                
+    #             primary_op, primary_params = op_chain[0]
+    #             chained_ops = op_chain[1:] if len(op_chain) > 1 else []
+                
+    #             return collection_name, primary_op, primary_params, chained_ops
+            
+    #         # Parse and evaluate JSON-like parameters safely
+    #         def safe_eval_params(params_str: str):
+    #             if not params_str.strip():
+    #                 return {}
+                    
+    #             # Try to handle various parameter formats
+    #             try:
+    #                 # First attempt direct JSON parsing
+    #                 return json.loads(params_str)
+    #             except json.JSONDecodeError:
+    #                 try:
+    #                     # Handle JavaScript style parameters (unquoted keys)
+    #                     # Convert to proper JSON format by quoting keys
+    #                     fixed_params = re.sub(r'(\w+)(?=\s*:)', r'"\1"', params_str)
+    #                     return json.loads(fixed_params)
+    #                 except (json.JSONDecodeError, re.error):
+    #                     try:
+    #                         # Handle ObjectId references
+    #                         if "ObjectId" in params_str:
+    #                             # Replace ObjectId syntax with proper format
+    #                             params_str = re.sub(r'ObjectId\(["\'](.+?)["\']\)', r'{"$oid": "\1"}', params_str)
+    #                             return json.loads(params_str)
+    #                     except (json.JSONDecodeError, re.error):
+    #                         self.logger.add_log(f"❌ Failed to parse parameters: {params_str}")
+    #                         raise ValueError(f"Could not parse query parameters: {params_str}")
                     
     #         # Handle string-based commands
     #         if isinstance(raw_command, str):
-    #             cmd = raw_command.strip().lower()
+    #             cmd = raw_command.strip()
+    #             cmd_lower = cmd.lower()
                 
     #             # Block potentially unsafe string commands
-    #             if contains_unsafe_operations(cmd):
+    #             if contains_unsafe_operations(cmd_lower):
     #                 self.logger.add_log(f"❌ Blocked unsafe operation in command: {raw_command}")
     #                 return {"error": "Operation blocked - only read operations are permitted"}
                     
-    #             # Process safe string commands
-    #             if cmd in SAFE_STRING_COMMANDS:
-    #                 if cmd == "show collections":
+    #             # Process safe standard string commands
+    #             if cmd_lower in SAFE_STRING_COMMANDS:
+    #                 if cmd_lower == "show collections":
     #                     result = self.db.list_collection_names()
     #                     return result
-    #                 elif cmd == "show dbs" or cmd == "show databases":
+    #                 elif cmd_lower in ("show dbs", "show databases"):
     #                     result = self.client.list_database_names()
     #                     return result
-    #                 elif cmd == "db stats" or cmd == "db.stats()":
+    #                 elif cmd_lower in ("db stats", "db.stats()"):
     #                     return self.db.command("dbstats")
-    #             else:
-    #                 self.logger.add_log(f"❌ Unsupported or potentially unsafe string command: {raw_command}")
-    #                 return {"error": "Command not supported in read-only mode"}
+    #                 elif cmd_lower == "show profile":
+    #                     return self.db.command("profile", -1)
+    #                 elif cmd_lower == "db.getProfilingStatus()":
+    #                     return self.db.command("profile", -1)
+    #                 elif cmd_lower == "db.version()":
+    #                     return self.db.command("buildInfo").get("version")
+                
+    #             # Handle MongoDB shell syntax (db.collection.method())
+    #             elif cmd.startswith("db."):
+    #                 # Parse the command to extract collection and operation
+    #                 collection_name, primary_op, primary_params, chained_ops = parse_shell_command(cmd)
+                    
+    #                 if collection_name == "getCollectionNames()":
+    #                     return self.db.list_collection_names()
+                    
+    #                 if not collection_name or not primary_op:
+    #                     self.logger.add_log(f"❌ Could not parse MongoDB shell command: {cmd}")
+    #                     return {"error": "Invalid MongoDB shell command format"}
+                    
+    #                 # Process the primary operation
+    #                 try:
+    #                     collection = self.db[collection_name]
+                        
+    #                     # Handle findOne()
+    #                     if primary_op == "findOne":
+    #                         filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+    #                         result = collection.find_one(filter_dict)
+    #                         return json.loads(json_util.dumps(result)) if result else None
+                        
+    #                     # Handle find() and variations
+    #                     elif primary_op == "find":
+    #                         filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+    #                         cursor = collection.find(filter_dict)
+                            
+    #                         # Process chained operations (sort, limit, skip, etc.)
+    #                         for op_name, op_params in chained_ops:
+    #                             if op_name == "count":
+    #                                 return collection.count_documents(filter_dict)
+    #                             elif op_name == "sort":
+    #                                 sort_params = safe_eval_params(op_params)
+    #                                 cursor = cursor.sort(list(sort_params.items()))
+    #                             elif op_name == "limit":
+    #                                 limit_val = int(op_params.strip())
+    #                                 cursor = cursor.limit(limit_val)
+    #                             elif op_name == "skip":
+    #                                 skip_val = int(op_params.strip())
+    #                                 cursor = cursor.skip(skip_val)
+    #                             elif op_name == "project" or op_name == "projection":
+    #                                 proj_params = safe_eval_params(op_params)
+    #                                 cursor = cursor.projection(proj_params)
+                            
+    #                         # If no chained operations consumed the result, return the cursor as a list
+    #                         result = list(cursor)
+    #                         return json.loads(json_util.dumps(result)) if result else []
+                        
+    #                     # Handle aggregate()
+    #                     elif primary_op == "aggregate":
+    #                         pipeline = safe_eval_params(primary_params) if primary_params.strip() else []
+                            
+    #                         # Ensure the pipeline doesn't contain $out or $merge
+    #                         for stage in pipeline:
+    #                             if "$out" in stage or "$merge" in stage:
+    #                                 self.logger.add_log(f"❌ Blocked unsafe aggregation stage in: {raw_command}")
+    #                                 return {"error": "Unsafe aggregation stage detected"}
+                            
+    #                         result = list(collection.aggregate(pipeline))
+    #                         return json.loads(json_util.dumps(result)) if result else []
+                        
+    #                     # Handle count() and countDocuments()
+    #                     elif primary_op in ("count", "countDocuments"):
+    #                         filter_dict = {} if not primary_params.strip() else safe_eval_params(primary_params)
+    #                         return collection.count_documents(filter_dict)
+                        
+    #                     # Handle estimatedDocumentCount()
+    #                     elif primary_op == "estimatedDocumentCount":
+    #                         return collection.estimated_document_count()
+                        
+    #                     # Handle distinct()
+    #                     elif primary_op == "distinct":
+    #                         # Split params by the first comma outside of brackets/objects
+    #                         params = []
+    #                         current_param = ""
+    #                         depth = 0
+                            
+    #                         for char in primary_params:
+    #                             if char in "{[":
+    #                                 depth += 1
+    #                                 current_param += char
+    #                             elif char in "}]":
+    #                                 depth -= 1
+    #                                 current_param += char
+    #                             elif char == ',' and depth == 0:
+    #                                 params.append(current_param.strip())
+    #                                 current_param = ""
+    #                             else:
+    #                                 current_param += char
+                            
+    #                         if current_param:
+    #                             params.append(current_param.strip())
+                            
+    #                         if len(params) >= 1:
+    #                             key = params[0].strip().strip('"\'')
+    #                             filter_dict = {} if len(params) < 2 else safe_eval_params(params[1])
+    #                             result = collection.distinct(key, filter_dict)
+    #                             return json.loads(json_util.dumps(result)) if result else []
+                        
+    #                     # Handle stats()
+    #                     elif primary_op == "stats":
+    #                         return self.db.command("collstats", collection_name)
+                        
+    #                     # Handle explain()
+    #                     elif primary_op == "explain":
+    #                         explain_params = safe_eval_params(primary_params)
+    #                         return collection.find(explain_params).explain()
+                    
+    #                 except Exception as e:
+    #                     self.logger.add_log(f"❌ Error executing MongoDB shell command: {str(e)}")
+    #                     return {"error": f"Error executing command: {str(e)}"}
+                
+    #             # Command not recognized
+    #             self.logger.add_log(f"❌ Unsupported or potentially unsafe string command: {raw_command}")
+    #             return {"error": "Command not supported in read-only mode"}
 
     #         # Handle dict-based commands
     #         elif isinstance(raw_command, dict):
@@ -408,22 +782,40 @@ class MongoDBManager:
     #                 projection = raw_command.get("projection")
     #                 sort = raw_command.get("sort")
     #                 limit = raw_command.get("limit")
+    #                 skip = raw_command.get("skip")
+    #                 hint = raw_command.get("hint")
+    #                 max_time_ms = raw_command.get("maxTimeMS")
 
     #                 cursor = self.db[coll_name].find(filter_, projection or {})
     #                 if sort:
-    #                     cursor = cursor.sort(sort.items() if isinstance(sort, dict) else sort)
+    #                     cursor = cursor.sort(list(sort.items()) if isinstance(sort, dict) else sort)
     #                 if limit:
     #                     cursor = cursor.limit(limit)
+    #                 if skip:
+    #                     cursor = cursor.skip(skip)
+    #                 if hint:
+    #                     cursor = cursor.hint(hint)
+    #                 if max_time_ms:
+    #                     cursor = cursor.max_time_ms(max_time_ms)
 
     #                 result = list(cursor)
     #                 return json.loads(json_util.dumps(result)) if result else []
                 
-    #             # Handle other safe operations
-    #             elif any(op in raw_command for op in ["count", "distinct", "aggregate"]):
-    #                 op = next(op for op in ["count", "distinct", "aggregate"] if op in raw_command)
+    #             # Handle findOne operation
+    #             elif "findOne" in raw_command:
+    #                 coll_name = raw_command["findOne"]
+    #                 filter_ = raw_command.get("filter", {})
+    #                 projection = raw_command.get("projection")
+                    
+    #                 result = self.db[coll_name].find_one(filter_, projection or {})
+    #                 return json.loads(json_util.dumps(result)) if result else None
+                
+    #             # Handle other collection operations
+    #             elif any(op in raw_command for op in ["count", "countDocuments", "distinct", "aggregate"]):
+    #                 op = next(op for op in ["count", "countDocuments", "distinct", "aggregate"] if op in raw_command)
     #                 coll_name = raw_command[op]
                     
-    #                 if op == "count":
+    #                 if op in ["count", "countDocuments"]:
     #                     filter_ = raw_command.get("filter", {})
     #                     return self.db[coll_name].count_documents(filter_)
                     
@@ -445,6 +837,15 @@ class MongoDBManager:
                         
     #                     result = list(self.db[coll_name].aggregate(pipeline))
     #                     return json.loads(json_util.dumps(result)) if result else []
+                
+    #             # For database and collection information commands
+    #             elif "listCollections" in raw_command:
+    #                 filter_ = raw_command.get("filter", {})
+    #                 return list(self.db.list_collections(filter_))
+                
+    #             elif "collStats" in raw_command or "collstats" in raw_command:
+    #                 coll_name = raw_command.get("collStats") or raw_command.get("collstats")
+    #                 return self.db.command("collstats", coll_name)
                 
     #             # For other dict commands, only allow specifically whitelisted operations
     #             else:

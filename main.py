@@ -1,9 +1,8 @@
 import os
 import sys
-from typing import List, Optional
 import requests
 from src.logger import Logger
-from dotenv import load_dotenv
+from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 from src.llm.openai_client import OpenAIClient
 from src.db.postgres.database import PostgresDBManager
@@ -21,7 +20,7 @@ mcp = FastMCP("Basic MCP Server")
 logger = Logger()
 db_manager = PostgresDBManager(logger)
 db_manager2 = MongoDBManager(logger)
-groupay_base_url= os.environ.get("GROUPAY_BASE_URL")
+base_url= os.environ.get("BASE_URL")
 
 
 # Register MCP tools for Logger
@@ -182,7 +181,7 @@ def send_email(subject: str, message1: str, email: str, message2: Optional[str] 
     try:
         payload = EmailPayload(subject=subject, message1=message1, message2=message2, email=email)
         response = requests.post(
-            f"{groupay_base_url}/send-email-2",
+            f"{base_url}/send-email-2",
             json=payload.model_dump(exclude_none=True)
         )
         response.raise_for_status()
@@ -208,7 +207,7 @@ def send_sms(message: str, phone_number: str) -> str:
     """
     try:
         payload = SMSPayload(message=message, phoneNumber=phone_number)
-        response = requests.post(f"{groupay_base_url}/send-sms-2",
+        response = requests.post(f"{base_url}/send-sms-2",
             json=payload.model_dump(exclude_none=True)          )
         response.raise_for_status()
         msg =  f"SMS sent successfully. Response: {response.text}"
@@ -235,7 +234,7 @@ def send_push_notification(message: str, one_signal_ids: List[str], action_name:
     try:
         payload = PushPayload(message=message, oneSignalIds=one_signal_ids, actionName=action_name)
         response = requests.post(
-             f"{groupay_base_url}/push",
+             f"{base_url}/push",
             json=payload.model_dump(exclude_none=True)
         )
         response.raise_for_status()
