@@ -1,3 +1,4 @@
+
 # Basic MCP Server
 
 ## Overview
@@ -98,7 +99,7 @@ Basic MCP Server is a comprehensive platform that analyzes your Postgres, MySQL,
    ```
 
 3. **Configure Claude Desktop settings**:
-   Add the following configuration to Claude Desktop:
+   Add/review the following configuration of your Claude Desktop:
    ```json
    "Basic MCP Server": {
      "command": "uv",
@@ -118,7 +119,7 @@ Basic MCP Server is a comprehensive platform that analyzes your Postgres, MySQL,
 ## Security Considerations
 
 1. **Restricted Database Permissions**:
-   - Only read operations (SELECT, FIND) are permitted for the LLM tools
+   - Only read operations (eg. SELECT, FIND) database are permitted for the LLM tools
 
 2. **Secure Environment Variables**:
    ```bash
@@ -169,6 +170,8 @@ If Claude Desktop cannot connect to your MCP server:
    ```
 
 ## Usage Guide
+
+Your knowledge of the database is key to make the best of this MCP server tools.
 
 1. **Connect to Claude Desktop**:
    - Open Claude Desktop
