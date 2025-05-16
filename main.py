@@ -5,10 +5,12 @@ from src.logger import Logger
 from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 from src.llm.openai_client import OpenAIClient
-from src.db.postgres.database import PostgresDBManager
-from src.db.postgres.analyzer import PostgresDBAnalyzer
 from src.db.mongo.database import MongoDBManager
 from src.db.mongo.analyzer import MongoDBAnalyzer
+from src.db.mysql.database import MySQLDBManager
+from src.db.mysql.analyzer import MySQLDBAnalyzer
+from src.db.postgres.database import PostgresDBManager
+from src.db.postgres.analyzer import PostgresDBAnalyzer
 from src.validator import EmailPayload, PushPayload, SMSPayload
 # print("Python executable:", sys.executable, file=sys.stderr)
 # print("Python path:", sys.path, file=sys.stderr)
@@ -20,6 +22,7 @@ mcp = FastMCP("Basic MCP Server")
 logger = Logger()
 db_manager = PostgresDBManager(logger)
 db_manager2 = MongoDBManager(logger)
+db_manager3 = MySQLDBManager(logger)
 base_url= os.environ.get("BASE_URL")
 
 
@@ -27,11 +30,11 @@ base_url= os.environ.get("BASE_URL")
 @mcp.tool()
 def db_analyzer(request: str, type:str) -> str:
     """
-    The tool analyzer Progress and Mongo database base on prompt or request.
+    The tool analyzer Progress, MySQL and Mongo database base on prompt or request.
 
     Args:
         request (str): Question whose answer can be gotten from database
-        type (str) is either postgres or mongo.
+        type (str) is either postgres or mongo or msql.
 
     Returns:
         str: Query results or error message
@@ -40,16 +43,26 @@ def db_analyzer(request: str, type:str) -> str:
     if type =='mongo':
         analyzer = MongoDBAnalyzer()
         if not analyzer.initialize():
-            logger.add_log("Exiting due to initialization failure. Check logs")
+            logger.add_log("Exiting due to Mongo initialization failure. Check logs")
+            sys.exit(1)
+        result = analyzer.process_request(request)
+    
+    elif type =='msql':
+        analyzer = MySQLDBAnalyzer()
+        if not analyzer.initialize():
+            logger.add_log("Exiting due to MySQL initialization failure. Check logs")
+            sys.exit(1)
+        result = analyzer.process_request(request)
+
+    elif type =='postgres':
+        analyzer = PostgresDBAnalyzer()
+        if not analyzer.initialize():
+            logger.add_log("Exiting due to Postgres initialization failure. Check logs")
             sys.exit(1)
         result = analyzer.process_request(request)
 
     else:
-        analyzer = PostgresDBAnalyzer()
-        if not analyzer.initialize():
-            logger.add_log("Exiting due to initialization failure. Check logs")
-            sys.exit(1)
-        result = analyzer.process_request(request)
+        return f"Unsupported database type: {type}. Supported types are postgres or mongo or mysql."
     
     if result is None:
         return "Request execution failed. Check logs for details."
@@ -88,7 +101,7 @@ def run_query(query: str, type:str) -> str:
 
     Args:
         query (str): SQL or NoSQL query to execute
-        type (str) is either postgres or mongo.
+        type (str) is either postgres or mongo or mysql.
 
 
     Returns:
@@ -102,13 +115,22 @@ def run_query(query: str, type:str) -> str:
             sys.exit(1)
         results = analyzer.db_manager.execute_query(query)
         # results = analyzer.db_manager.get_collection_schema()
-
-    else:
+    elif type =='mysql':
+        analyzer = MySQLDBAnalyzer()
+        if not analyzer.initialize():
+            logger.add_log("Exiting due to initialization failure. Check logs")
+            sys.exit(1)
+        results = analyzer.db_manager.execute_query(query)
+        # results = analyzer.db_manager.get_collection_schema()
+    elif type =='postgres':
         analyzer = PostgresDBAnalyzer()
         if not analyzer.initialize():
             logger.add_log("Exiting due to initialization failure. Check logs")
             sys.exit(1)
         results = analyzer.db_manager.execute_query(query)
+    else:
+        return f"Unsupported database type: {type}. Supported types are postgres or mongo or mysql."
+
     
     if results is None:
         return "Query execution failed. Check logs for details."

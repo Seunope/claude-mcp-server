@@ -49,11 +49,11 @@ class MySQLDBAnalyzer:
             bool: True if all connections successful, False otherwise
         """
 
-        host = os.environ.get("DB_HOST")
-        port = os.environ.get("DB_PORT")
-        database = os.environ.get("DB_NAME")  # Changed from dbname to database for MySQL
-        user = os.environ.get("DB_USER")
-        password = os.environ.get("DB_PASSWORD")
+        host = os.environ.get("MYSQL_DB_HOST")
+        port = os.environ.get("MYSQL_DB_PORT")
+        database = os.environ.get("MYSQL_DB_NAME")  
+        user = os.environ.get("MYSQL_DB_USER")
+        password = os.environ.get("MYSQL_DB_PASSWORD")
 
         db_success = self.db_manager.connect(host, port, database, user, password)
         openai_success = self.openai_client.initialize()

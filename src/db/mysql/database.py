@@ -23,7 +23,6 @@ class MySQLDBManager:
             self.connection_params['connect_timeout'] = 60  # Default 60 seconds for connection timeout
         self.connection = None
         self.table_schema = {}
-
     
     def connect(self, 
                 host: str = None, 
@@ -72,13 +71,27 @@ class MySQLDBManager:
                 if statement_timeout:
                     # Convert milliseconds to seconds for MySQL
                     timeout_seconds = statement_timeout / 1000
-                    cursor.execute(f"SET max_execution_time = {int(statement_timeout)};")  # MySQL specific timeout in milliseconds
+                    try:
+                        cursor.execute(f"SET max_execution_time = {int(statement_timeout)};")  # MySQL specific timeout in milliseconds
+                    except mysql.connector.Error as e:
+                        if "Unknown system variable" in str(e):
+                            self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                            cursor.execute(f"SET SESSION wait_timeout = {int(timeout_seconds)};")
+                            cursor.execute(f"SET SESSION interactive_timeout = {int(timeout_seconds)};")
+                        else:
+                            raise
                     cursor.execute(f"SET interactive_timeout = {int(timeout_seconds)};")  # MySQL session timeout in seconds
                     cursor.execute(f"SET wait_timeout = {int(timeout_seconds)};")  # MySQL connection timeout in seconds
-                
-                # Set default timeouts
                 else:
-                    cursor.execute("SET max_execution_time = 300000;")  # 5 minutes
+                    try:
+                        cursor.execute("SET max_execution_time = 300000;")  # 5 minutes
+                    except mysql.connector.Error as e:
+                        if "Unknown system variable" in str(e):
+                            self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                            cursor.execute("SET SESSION wait_timeout = 300;")  # 5 minutes
+                            cursor.execute("SET SESSION interactive_timeout = 300;")  # 5 minutes
+                        else:
+                            raise
                     cursor.execute("SET interactive_timeout = 300;")  # 5 minutes
                     cursor.execute("SET wait_timeout = 300;")  # 5 minutes
                 
@@ -121,15 +134,22 @@ class MySQLDBManager:
             # Check if query is safe
             if not self.is_read_only_query(normalized_query) or self.contains_unsafe_operations(normalized_query):
                 self.logger.add_log(f"Query blocked: Non-read operation detected in query: {query[:50]}{'...' if len(query) > 50 else ''}")
-                return {"error": "Operation blocked -  Non-read operation detected in query"}
-
+                return {"error": "Operation blocked - Non-read operation detected in query"}
                 
             # If we got here, the query is safe to execute
             cursor = self.connection.cursor()
             
             # Set a specific timeout for this query if requested
             if timeout:
-                cursor.execute(f"SET max_execution_time = {timeout};")
+                try:
+                    cursor.execute(f"SET max_execution_time = {timeout};")
+                except mysql.connector.Error as e:
+                    if "Unknown system variable" in str(e):
+                        self.logger.add_log(f"max_execution_time not supported, using statement timeout settings instead")
+                        cursor.execute(f"SET SESSION wait_timeout = {timeout // 1000 + 1};")
+                        cursor.execute(f"SET SESSION interactive_timeout = {timeout // 1000 + 1};")
+                    else:
+                        raise
             
             cursor.execute(query, params or ())
             
@@ -138,7 +158,6 @@ class MySQLDBManager:
                 self.logger.add_log(f"Read query executed successfully: {query[:50]}{'...' if len(query) > 50 else ''}")
                 return results
             except mysql.connector.errors.InterfaceError as e:
-                # This can happen if the query doesn't return any rows
                 if "No result set to fetch from" in str(e):
                     self.logger.add_log(f"Query executed but returned no results: {query[:50]}{'...' if len(query) > 50 else ''}")
                     return []
@@ -146,42 +165,34 @@ class MySQLDBManager:
                     self.logger.add_log(f"Unexpected error with read-only query: {str(e)}")
                     self.connection.rollback()
                     return {"error": f"Unexpected error with read-only query: {str(e)}"}
-
                     
         except Exception as e:
             error_msg = str(e).replace("\n", " ")
             self.logger.add_log(f"Query execution failed: {error_msg}")
             self.connection.rollback()
             return {"error": f"Query execution failed: {error_msg}"}
-
     
-    # Check if query is read-only
     def is_read_only_query(self, sql: str) -> bool:
         """Determine if a SQL query is read-only (SELECT or other safe read operations)"""
-        # Check if query starts with SELECT
         if sql.startswith("SELECT"):
             return True
             
-        # Other safe read-only operations
         safe_prefixes = [
             "EXPLAIN ",
             "SHOW ",
             "DESCRIBE ",
-            "WITH ", # CTEs - need further inspection
+            "WITH ",
         ]
         
         for prefix in safe_prefixes:
             if sql.startswith(prefix):
-                # For WITH queries, we need to ensure they don't contain data modification
                 if prefix == "WITH ":
-                    # Check for INSERT/UPDATE/DELETE in the CTE
                     unsafe_keywords = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE"]
                     return not any(keyword in sql for keyword in unsafe_keywords)
                 return True
                 
         return False
     
-    # Check for unsafe operations
     def contains_unsafe_operations(self, sql: str) -> bool:
         """Check if SQL contains any operations that could modify the database"""
         unsafe_keywords = [
@@ -194,7 +205,6 @@ class MySQLDBManager:
             "KILL", "LOAD", "HANDLER"
         ]
         
-        # Check for unsafe functions - MySQL specific
         unsafe_functions = [
             "SLEEP", "BENCHMARK", "LOAD_FILE", "FOUND_ROWS", "DATABASE", 
             "USER", "SYSTEM_USER", "SESSION_USER", "PASSWORD", "ENCRYPT", 
@@ -202,19 +212,16 @@ class MySQLDBManager:
         ]
         
         for keyword in unsafe_keywords:
-            # Match whole words only
             pattern = r'\b' + keyword + r'\b'
             if re.search(pattern, sql):
                 return True
                 
         for func in unsafe_functions:
-            # Match function calls
             pattern = r'\b' + func + r'\s*\('
             if re.search(pattern, sql):
                 return True
                 
         return False
-        
     
     def get_table_schema(self) -> bool:
         """
@@ -224,7 +231,7 @@ class MySQLDBManager:
             bool: True if successful, False otherwise
         """
         self.logger.add_log("Retrieving table schema...")
-
+        
         if not self.connection:
             self.logger.add_log("Database not connected")
             return False
@@ -232,8 +239,16 @@ class MySQLDBManager:
         try:
             cursor = self.connection.cursor()
             
-            # Set a longer timeout for schema operations which might be slow on large databases
-            cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+            # Set a longer timeout for schema operations
+            try:
+                cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+            except mysql.connector.Error as e:
+                if "Unknown system variable" in str(e):
+                    self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                    cursor.execute("SET SESSION wait_timeout = 600;")  # 10 minutes
+                    cursor.execute("SET SESSION interactive_timeout = 600;")  # 10 minutes
+                else:
+                    raise
             
             # Get list of tables - MySQL specific
             cursor.execute("""
@@ -282,21 +297,26 @@ class MySQLDBManager:
             return None
             
         try:
-            # Create a new connection with specified timeout if needed
+            # Set a specific timeout for this query if requested
             if timeout:
                 with self.connection.cursor() as cursor:
-                    cursor.execute(f"SET max_execution_time = {timeout};")
+                    try:
+                        cursor.execute(f"SET max_execution_time = {timeout};")
+                    except mysql.connector.Error as e:
+                        if "Unknown system variable" in str(e):
+                            self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                            cursor.execute(f"SET SESSION wait_timeout = {timeout // 1000 + 1};")
+                            cursor.execute(f"SET SESSION interactive_timeout = {timeout // 1000 + 1};")
+                        else:
+                            raise
                     self.connection.commit()
             
-            # MySQL connector doesn't support direct pandas.read_sql with params dict
-            # We'll create our own implementation
             if params:
                 cursor = self.connection.cursor(dictionary=True)
                 cursor.execute(query, params)
                 result = pd.DataFrame(cursor.fetchall())
                 cursor.close()
             else:
-                # Use pandas read_sql for simpler queries without params
                 result = pd.read_sql(query, self.connection)
                 
             self.logger.add_log(f"Query to DataFrame executed successfully: {query[:50]}{'...' if len(query) > 50 else ''}")
@@ -321,9 +341,16 @@ class MySQLDBManager:
             cursor = self.connection.cursor()
             
             # Set a longer timeout for schema operations
-            cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+            try:
+                cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+            except mysql.connector.Error as e:
+                if "Unknown system variable" in str(e):
+                    self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                    cursor.execute("SET SESSION wait_timeout = 600;")  # 10 minutes
+                    cursor.execute("SET SESSION interactive_timeout = 600;")  # 10 minutes
+                else:
+                    raise
             
-            # MySQL specific query for foreign keys
             cursor.execute("""
                 SELECT
                     TABLE_NAME AS table_name,
@@ -373,13 +400,20 @@ class MySQLDBManager:
                 "relationships": self.get_table_relationships()
             }
             
-            # Get index information - MySQL specific
             if self.connection:
                 indexes = {}
                 
                 with self.connection.cursor() as cursor:
                     # Set a longer timeout for schema operations
-                    cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+                    try:
+                        cursor.execute("SET max_execution_time = 600000;")  # 10 minutes
+                    except mysql.connector.Error as e:
+                        if "Unknown system variable" in str(e):
+                            self.logger.add_log(f"max_execution_time not supported, using session timeout settings instead")
+                            cursor.execute("SET SESSION wait_timeout = 600;")  # 10 minutes
+                            cursor.execute("SET SESSION interactive_timeout = 600;")  # 10 minutes
+                        else:
+                            raise
                     
                     cursor.execute("""
                         SELECT
@@ -401,7 +435,6 @@ class MySQLDBManager:
                         if table_name not in indexes:
                             indexes[table_name] = []
                             
-                        # Check if this index is already in our list
                         index_exists = False
                         for index in indexes[table_name]:
                             if index["name"] == index_name:

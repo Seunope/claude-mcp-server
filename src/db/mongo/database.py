@@ -101,7 +101,7 @@ class MongoDBManager:
                 self.db = self.client[db_name]
                 self.logger.add_log(f"Database selected: {db_name}")
             
-            self.logger.add_log(f"MongoDB connection successful -")
+            self.logger.add_log(f"MongoDB  connection successful -")
             return True
             
         except Exception as e:

@@ -68,7 +68,7 @@ class PostgresDBManager:
             
         try:
             self.connection = psycopg2.connect(**self.connection_params)
-            self.logger.add_log(f"Database connection successful - Host:")
+            self.logger.add_log(f"Database Postgres connection successful - Host:")
             
             # Set session parameters for all connections
             with self.connection.cursor() as cursor:
