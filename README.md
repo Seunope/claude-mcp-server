@@ -224,6 +224,8 @@ We welcome contributions to the Basic MCP Server project:
 4. Push to the branch: `git push origin feature/amazing-feature`
 5. Open a Pull Request
 
+<a href="https://www.buymeacoffee.com/seunope" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
