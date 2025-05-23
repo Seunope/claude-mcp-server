@@ -1,5 +1,6 @@
 
 # Basic MCP Server
+Get dashboard metrics at the speed of thought.
 
 ## Overview
 
@@ -195,6 +196,19 @@ Your knowledge of the database is key to make the best of this MCP server tools.
 ### Sample Analytics Prompt
 
 Here's a sample prompt you can use with Claude Desktop to analyze your database:
+
+
+```
+How many customers do we have in Groupay db
+```
+
+```
+Give the list of the most common  product from the transactions table
+```
+
+```
+Send all these information as an email to alocmass@gmail.com
+```
 
 ```
 You are an expert data analyst specializing in database and business intelligence. Your task is to provide a detailed, insightful, and actionable health analysis based on available database records.
