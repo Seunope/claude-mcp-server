@@ -13,6 +13,13 @@ Basic MCP Server is a comprehensive platform that analyzes your Postgres, MySQL,
 - **Communication Tools**: Built-in functionality to send emails and SMS notifications
 - **Claude Desktop Integration**: Seamless interaction with Claude AI for database analysis
 
+
+## MCP Server Process Diagram
+
+The diagram below illustrates how Claude Desktop interacts with MCP Server tools based on user prompts.
+
+![MCP Process Flow](./src/assets/mcp_process_flow.png)
+
 ## Installation
 
 ### Prerequisites
