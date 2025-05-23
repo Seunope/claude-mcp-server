@@ -199,7 +199,7 @@ Here's a sample prompt you can use with Claude Desktop to analyze your database:
 
 
 ```
-How many customers do we have in Groupay db
+How many customers do we have in postgres database
 ```
 
 ```
